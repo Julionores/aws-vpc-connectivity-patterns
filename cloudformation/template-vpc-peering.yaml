@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Pattern 1 : VPC Peering entre deux VPC isolés. Le template de cours d'origine créait les
+  deux VPC, leurs instances et security groups, mais jamais la connexion de peering ni les
+  routes qui permettent réellement au trafic de transiter entre les deux réseaux -- les
+  deux VPC restaient totalement étanches l'un à l'autre malgré leur apparente proximité.
+
+Parameters:
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI Amazon Linux 2023 la plus récente (résolue via SSM Parameter Store)
+
+Resources:
+  # ===== Rôle IAM partagé : permet la connexion via SSM Session Manager, sans SSH =====
+  SsmInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SsmInstanceRole
+
+  # ===== VPC 1 =====
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC1
+
+  IGW1:
+    Type: AWS::EC2::InternetGateway
+
+  IGW1Attachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC1
+      InternetGatewayId: !Ref IGW1
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VPC1-Public-Subnet
+
+  RouteTablePublic1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+
+  RoutePublic1Internet:
+    Type: AWS::EC2::Route
+    DependsOn: IGW1Attachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW1
+
+  # Route ajoutée : sans elle, VPC1 ne sait pas comment atteindre VPC2, même une fois le
+  # peering établi -- une connexion de peering ne crée AUCUNE route automatiquement.
+  RoutePublic1ToVpc2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePublic1
+      DestinationCidrBlock: 10.1.0.0/16
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTablePublic1
+
+  # ===== VPC 2 =====
+  VPC2:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC2
+
+  IGW2:
+    Type: AWS::EC2::InternetGateway
+
+  IGW2Attachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC2
+      InternetGatewayId: !Ref IGW2
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC2
+      CidrBlock: 10.1.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VPC2-Public-Subnet
+
+  RouteTablePublic2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC2
+
+  RoutePublic2Internet:
+    Type: AWS::EC2::Route
+    DependsOn: IGW2Attachment
+    Properties:
+      RouteTableId: !Ref RouteTablePublic2
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW2
+
+  RoutePublic2ToVpc1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePublic2
+      DestinationCidrBlock: 10.0.0.0/16
+      VpcPeeringConnectionId: !Ref VpcPeeringConnection
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTablePublic2
+
+  # ===== La ressource qui manquait dans le template de cours d'origine =====
+  VpcPeeringConnection:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !Ref VPC1
+      PeerVpcId: !Ref VPC2
+      Tags:
+        - Key: Name
+          Value: VPC1-VPC2-Peering
+
+  # ===== Security groups : HTTP autorisé depuis Internet ET depuis le VPC pair, pas de SSH
+  # (la connexion s'effectue via SSM Session Manager) =====
+  WebSecurityGroup1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Autorise HTTP depuis Internet et depuis le VPC pair
+      VpcId: !Ref VPC1
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.1.0.0/16
+
+  WebSecurityGroup2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Autorise HTTP depuis Internet et depuis le VPC pair
+      VpcId: !Ref VPC2
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.0.0.0/16
+
+  # ===== Instances EC2 =====
+  WebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup1
+      IamInstanceProfile: !Ref SsmInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y nginx
+          echo "<h1>Serveur Web dans VPC1</h1>" > /usr/share/nginx/html/index.html
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: WebServer1-VPC1
+
+  WebServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      SubnetId: !Ref PublicSubnet2
+      SecurityGroupIds:
+        - !Ref WebSecurityGroup2
+      IamInstanceProfile: !Ref SsmInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y nginx
+          echo "<h1>Serveur Web dans VPC2</h1>" > /usr/share/nginx/html/index.html
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: WebServer2-VPC2
+
+Outputs:
+  WebServer1PrivateIp:
+    Description: IP privée du serveur dans VPC1
+    Value: !GetAtt WebServer1.PrivateIp
+  WebServer2PrivateIp:
+    Description: IP privée du serveur dans VPC2
+    Value: !GetAtt WebServer2.PrivateIp
+  WebServer1Id:
+    Description: ID de l'instance dans VPC1 (pour SSM Session Manager)
+    Value: !Ref WebServer1
+  WebServer2Id:
+    Description: ID de l'instance dans VPC2 (pour SSM Session Manager)
+    Value: !Ref WebServer2

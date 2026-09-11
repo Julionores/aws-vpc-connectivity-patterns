@@ -1,0 +1,403 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Pattern 2 : AWS Transit Gateway comme hub central reliant 3 VPC en étoile, sans avoir à
+  créer 3 connexions de peering point à point. Le template de cours d'origine créait les
+  3 VPC, leurs sous-réseaux et instances, mais jamais le Transit Gateway ni ses
+  rattachements (attachments) -- les 3 VPC restaient complètement isolés les uns des autres.
+
+Parameters:
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI Amazon Linux 2023 la plus récente (résolue via SSM Parameter Store)
+
+Resources:
+  SsmInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref SsmInstanceRole
+
+  # ===== La ressource centrale qui manquait dans le template de cours d'origine =====
+  # DefaultRouteTableAssociation/Propagation à "enable" : chaque VPC attaché apprend
+  # automatiquement les routes de tous les autres, sans configuration manuelle de tables
+  # de routage Transit Gateway dédiées -- adapté à une démo "full mesh" simple.
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      Description: Hub central reliant VPC1, VPC2 et VPC3
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      Tags:
+        - Key: Name
+          Value: DemoTransitGateway
+
+  # ===== VPC1 (10.5.0.0/16) =====
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.5.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC1
+
+  IGW1:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIGW1:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC1
+      InternetGatewayId: !Ref IGW1
+
+  VPC1Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      CidrBlock: 10.5.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VPC1Subnet
+
+  VPC1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+
+  VPC1RouteInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW1
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW1
+
+  VPC1RouteToVpc2:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc1
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable
+      DestinationCidrBlock: 10.6.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC1RouteToVpc3:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc1
+    Properties:
+      RouteTableId: !Ref VPC1RouteTable
+      DestinationCidrBlock: 10.7.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC1SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC1Subnet
+      RouteTableId: !Ref VPC1RouteTable
+
+  VPC1SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Autorise HTTP depuis Internet et depuis les 2 autres VPC
+      VpcId: !Ref VPC1
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.6.0.0/16
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.7.0.0/16
+
+  Instance1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      SubnetId: !Ref VPC1Subnet
+      SecurityGroupIds:
+        - !Ref VPC1SecurityGroup
+      IamInstanceProfile: !Ref SsmInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y nginx
+          echo "<h1>Serveur dans VPC1</h1>" > /usr/share/nginx/html/index.html
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: Instance-VPC1
+
+  # ===== VPC2 (10.6.0.0/16) =====
+  VPC2:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.6.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC2
+
+  IGW2:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIGW2:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC2
+      InternetGatewayId: !Ref IGW2
+
+  VPC2Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC2
+      CidrBlock: 10.6.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VPC2Subnet
+
+  VPC2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC2
+
+  VPC2RouteInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW2
+    Properties:
+      RouteTableId: !Ref VPC2RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW2
+
+  VPC2RouteToVpc1:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc2
+    Properties:
+      RouteTableId: !Ref VPC2RouteTable
+      DestinationCidrBlock: 10.5.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC2RouteToVpc3:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc2
+    Properties:
+      RouteTableId: !Ref VPC2RouteTable
+      DestinationCidrBlock: 10.7.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC2SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC2Subnet
+      RouteTableId: !Ref VPC2RouteTable
+
+  VPC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Autorise HTTP depuis Internet et depuis les 2 autres VPC
+      VpcId: !Ref VPC2
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.5.0.0/16
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.7.0.0/16
+
+  Instance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      SubnetId: !Ref VPC2Subnet
+      SecurityGroupIds:
+        - !Ref VPC2SecurityGroup
+      IamInstanceProfile: !Ref SsmInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y nginx
+          echo "<h1>Serveur dans VPC2</h1>" > /usr/share/nginx/html/index.html
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: Instance-VPC2
+
+  # ===== VPC3 (10.7.0.0/16) =====
+  VPC3:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.7.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC3
+
+  IGW3:
+    Type: AWS::EC2::InternetGateway
+
+  AttachIGW3:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC3
+      InternetGatewayId: !Ref IGW3
+
+  VPC3Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC3
+      CidrBlock: 10.7.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: VPC3Subnet
+
+  VPC3RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC3
+
+  VPC3RouteInternet:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW3
+    Properties:
+      RouteTableId: !Ref VPC3RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW3
+
+  VPC3RouteToVpc1:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc3
+    Properties:
+      RouteTableId: !Ref VPC3RouteTable
+      DestinationCidrBlock: 10.5.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC3RouteToVpc2:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachmentVpc3
+    Properties:
+      RouteTableId: !Ref VPC3RouteTable
+      DestinationCidrBlock: 10.6.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  VPC3SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC3Subnet
+      RouteTableId: !Ref VPC3RouteTable
+
+  VPC3SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Autorise HTTP depuis Internet et depuis les 2 autres VPC
+      VpcId: !Ref VPC3
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.5.0.0/16
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.6.0.0/16
+
+  Instance3:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmiId
+      SubnetId: !Ref VPC3Subnet
+      SecurityGroupIds:
+        - !Ref VPC3SecurityGroup
+      IamInstanceProfile: !Ref SsmInstanceProfile
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          yum update -y
+          yum install -y nginx
+          echo "<h1>Serveur dans VPC3</h1>" > /usr/share/nginx/html/index.html
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: Instance-VPC3
+
+  # ===== Rattachements du Transit Gateway =====
+  TransitGatewayAttachmentVpc1:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPC1
+      SubnetIds:
+        - !Ref VPC1Subnet
+
+  TransitGatewayAttachmentVpc2:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPC2
+      SubnetIds:
+        - !Ref VPC2Subnet
+
+  TransitGatewayAttachmentVpc3:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPC3
+      SubnetIds:
+        - !Ref VPC3Subnet
+
+Outputs:
+  Instance1Id:
+    Value: !Ref Instance1
+  Instance2Id:
+    Value: !Ref Instance2
+  Instance3Id:
+    Value: !Ref Instance3
+  Instance1PrivateIp:
+    Value: !GetAtt Instance1.PrivateIp
+  Instance2PrivateIp:
+    Value: !GetAtt Instance2.PrivateIp
+  Instance3PrivateIp:
+    Value: !GetAtt Instance3.PrivateIp
