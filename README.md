@@ -22,7 +22,9 @@ les réseaux restaient totalement étanches malgré leur apparente proximité.
 > [`postgresql-ha-repmgr`](https://github.com/Julionores/postgresql-ha-repmgr) et
 > [`iso27001-isms-toolkit`](https://github.com/Julionores/iso27001-isms-toolkit).
 > Côté Machine Learning, voir aussi [`gradientforge`](https://github.com/Julionores/gradientforge),
-> un moteur de régression et classification codé en NumPy pur.
+> un moteur de régression et classification codé en NumPy pur, et
+> [`radar-risque-impaye`](https://github.com/Julionores/radar-risque-impaye), un pipeline de
+> classification (scikit-learn) pour prédire le risque de retard de paiement.
 
 ## Comparatif
 
