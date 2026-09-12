@@ -27,8 +27,9 @@ les réseaux restaient totalement étanches malgré leur apparente proximité.
 > [`ticket-tide`](https://github.com/Julionores/ticket-tide),
 > [`inspectline`](https://github.com/Julionores/inspectline),
 > [`runbook-rag`](https://github.com/Julionores/runbook-rag), un assistant documentaire RAG,
-> et [`agent-matching-recrutement`](https://github.com/Julionores/agent-matching-recrutement),
-> un agent à outils multiples avec relâchement de contraintes.
+> [`agent-matching-recrutement`](https://github.com/Julionores/agent-matching-recrutement),
+> un agent à outils multiples avec relâchement de contraintes, et
+> [`mcp-odoo-toolkit`](https://github.com/Julionores/mcp-odoo-toolkit).
 
 ## Comparatif
 
